@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
 using Rebus.Handlers;
-using WorkerSagaDemo.Contracts;
 using WorkerSagaDemo.Contracts.Contracts;
 
 namespace WorkerSagaDemo.Worker.Handlers
