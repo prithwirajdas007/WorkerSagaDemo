@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  rabbitmq-poc:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-poc
+    ports:
+      - "5675:5672"      # host 5675 -> container 5672 (AMQP)
+      - "15675:15672"    # host 15675 -> container 15672 (management UI)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  postgres-poc:
+    image: postgres:16
+    container_name: postgres-poc
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: worker_demo
+    ports:
+      - "5435:5432"      # host 5435 -> container 5432
