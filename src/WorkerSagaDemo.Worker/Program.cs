@@ -1,10 +1,12 @@
 using JasperFx;
 using Marten;
 using Microsoft.Extensions.Hosting;
+using OpenTelemetry.Trace;
 using Rebus.Config;
 using Rebus.Persistence.InMem;
 using Rebus.RabbitMq;
 using Rebus.ServiceProvider;
+using WorkerSagaDemo.Worker;
 using WorkerSagaDemo.Worker.Handlers;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -13,6 +15,20 @@ var builder = Host.CreateApplicationBuilder(args);
 // Works on the generic host builder via the AddServiceDefaults extension
 // from WorkerSagaDemo.ServiceDefaults.
 builder.AddServiceDefaults();
+
+// Extend the OpenTelemetry tracer with our custom saga ActivitySource.
+// ServiceDefaults's ConfigureOpenTelemetry registers the ambient application
+// name as a source; we need to also register "WorkerSagaDemo.Saga" so spans
+// emitted by SagaTelemetry.ActivitySource are captured by the OTLP exporter
+// and shown in the Aspire dashboard Traces tab.
+//
+// Without this line, StartActivity() calls in the saga return null and no
+// spans are recorded -- silent failure, which is why this registration is
+// critical.
+builder.Services.ConfigureOpenTelemetryTracerProvider(tracing =>
+{
+    tracing.AddSource(SagaTelemetry.ActivitySourceName);
+});
 
 // Connection strings come from configuration:
 //   - Under Aspire, AppHost injects ConnectionStrings__worker_demo and
