@@ -5,11 +5,13 @@ using Npgsql;
 using Rebus.Bus;
 using Rebus.Config;
 using Rebus.Config.Outbox;
+using Rebus.Handlers;
 using Rebus.PostgreSql.Outbox;
 using Rebus.RabbitMq;
 using Rebus.Routing.TypeBased;
 using Rebus.ServiceProvider;
 using Rebus.Transport;
+using WorkerSagaDemo.Api;
 using WorkerSagaDemo.Contracts.Contracts;
 using WorkerSagaDemo.Contracts.Domain;
 
@@ -20,12 +22,19 @@ const string ConnectionString =
 
 builder.Services.AddOpenApi();
 
+// SignalR: real-time push to browser clients
+builder.Services.AddSignalR();
+
 // Marten: document store backed by PostgreSQL
 builder.Services.AddMarten(options =>
 {
     options.Connection(ConnectionString);
     options.AutoCreateSchemaObjects = AutoCreate.All;
 });
+
+// Register the Rebus handler that forwards JobStatusChanged events to SignalR.
+// AutoRegisterHandlersFromAssemblyOf picks up any IHandleMessages<T> in this assembly.
+builder.Services.AutoRegisterHandlersFromAssemblyOf<JobStatusChangedHandler>();
 
 // Rebus: message bus with Postgres-backed transactional outbox.
 // Messages sent inside a RebusTransactionScope with UseOutbox() are stored in
@@ -46,10 +55,27 @@ builder.Services.AddRebus(configure => configure
 
 var app = builder.Build();
 
+// Subscribe to JobStatusChanged events published by the Worker's saga.
+// Rebus pub/sub: when any service publishes JobStatusChanged, RabbitMQ
+// routes a copy to every subscriber's input queue. The API's queue is
+// "worker-saga-demo-api".
+using (var scope = app.Services.CreateScope())
+{
+    var bus = scope.ServiceProvider.GetRequiredService<IBus>();
+    await bus.Subscribe<JobStatusChanged>();
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+// Serve the static demo page (wwwroot/index.html) at the root URL
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// SignalR hub endpoint -- browser connects to ws://localhost:5041/hubs/jobs
+app.MapHub<JobHub>("/hubs/jobs");
 
 // Ping endpoint (not transactional, for connectivity checks)
 app.MapPost("/ping", async (IBus bus) =>

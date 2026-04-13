@@ -75,6 +75,8 @@ public class JobProcessingSaga :
             _session.Store(job);
             await _session.SaveChangesAsync();
 
+            await PublishStatusChangedAsync(job);
+
             Data.IsComplete = true;
             MarkAsComplete();
             _logger.LogInformation("Job {JobId} completed all steps. Saga complete.", job.Id);
@@ -89,6 +91,8 @@ public class JobProcessingSaga :
         _session.Store(job);
         await _session.SaveChangesAsync();
         _logger.LogInformation("Job {JobId} - Step '{StepName}' started", job.Id, step.Name);
+
+        await PublishStatusChangedAsync(job);
 
         await Task.Delay(1000);
 
@@ -117,9 +121,23 @@ public class JobProcessingSaga :
             job.CompletedAt = DateTimeOffset.UtcNow;
             _session.Store(job);
             await _session.SaveChangesAsync();
+
+            await PublishStatusChangedAsync(job);
         }
 
         Data.IsComplete = true;
         MarkAsComplete();
     }
+
+    /// <summary>
+    /// Publishes a JobStatusChanged event so subscribers (the API's SignalR
+    /// forwarder) can push real-time updates to connected browser clients.
+    /// </summary>
+    private Task PublishStatusChangedAsync(Job job) =>
+        _bus.Publish(new JobStatusChanged(
+            job.Id,
+            job.Status,
+            Data.CompletedSteps,
+            Data.TotalSteps,
+            DateTimeOffset.UtcNow));
 }
