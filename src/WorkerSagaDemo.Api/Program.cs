@@ -17,8 +17,29 @@ using WorkerSagaDemo.Contracts.Domain;
 
 var builder = WebApplication.CreateBuilder(args);
 
-const string ConnectionString =
-    "Host=localhost;Port=5435;Database=worker_demo;Username=postgres;Password=postgres";
+// Aspire service defaults: OpenTelemetry, health checks, service discovery.
+// When running under AppHost, all of these wire up automatically.
+// When running standalone (e.g. dotnet run from this project directly with
+// docker compose), this is still safe -- it just won't see Aspire-injected
+// telemetry endpoints.
+builder.AddServiceDefaults();
+
+// Connection strings come from configuration:
+//   - Under Aspire (dotnet run --project src/WorkerSagaDemo.AppHost), AppHost
+//     injects ConnectionStrings__worker_demo and ConnectionStrings__messaging
+//     environment variables pointing at Aspire-managed containers.
+//   - Standalone (dotnet run from this project), they fall back to the values
+//     in appsettings.Development.json which point at docker-compose containers
+//     on the well-known ports.
+var pgConnectionString = builder.Configuration.GetConnectionString("worker-demo")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'worker-demo'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
+
+var rabbitConnectionString = builder.Configuration.GetConnectionString("messaging")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'messaging'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
 
 builder.Services.AddOpenApi();
 
@@ -28,7 +49,7 @@ builder.Services.AddSignalR();
 // Marten: document store backed by PostgreSQL
 builder.Services.AddMarten(options =>
 {
-    options.Connection(ConnectionString);
+    options.Connection(pgConnectionString);
     options.AutoCreateSchemaObjects = AutoCreate.All;
 });
 
@@ -42,11 +63,8 @@ builder.Services.AutoRegisterHandlersFromAssemblyOf<JobStatusChangedHandler>();
 // RabbitMQ is unreachable, the message survives in Postgres and is delivered
 // once connectivity is restored.
 builder.Services.AddRebus(configure => configure
-    .Transport(t => t.UseRabbitMq(
-        "amqp://guest:guest@localhost:5675",
-        "worker-saga-demo-api"
-    ))
-    .Outbox(o => o.StoreInPostgreSql(ConnectionString, "rebus_outbox"))
+    .Transport(t => t.UseRabbitMq(rabbitConnectionString, "worker-saga-demo-api"))
+    .Outbox(o => o.StoreInPostgreSql(pgConnectionString, "rebus_outbox"))
     .Routing(r => r.TypeBased()
         .Map<PingMessage>("worker-saga-demo-worker")
         .Map<StartJobCommand>("worker-saga-demo-worker")
@@ -54,6 +72,9 @@ builder.Services.AddRebus(configure => configure
 );
 
 var app = builder.Build();
+
+// Aspire-provided endpoints: /health, /alive, etc.
+app.MapDefaultEndpoints();
 
 // Subscribe to JobStatusChanged events published by the Worker's saga.
 // Rebus pub/sub: when any service publishes JobStatusChanged, RabbitMQ
@@ -88,9 +109,13 @@ app.MapPost("/ping", async (IBus bus) =>
 // Create a Job, store in Marten, send command to Worker -- transactionally.
 // Both the Marten write and the Rebus outbox insert happen inside the same
 // Npgsql transaction, so either both succeed or neither does.
+//
+// Note: pgConnectionString is captured by closure from the local variable
+// declared above, so the same string used by AddMarten and the outbox is
+// used here for the raw NpgsqlConnection.
 app.MapPost("/jobs", async (IBus bus, IDocumentStore store) =>
 {
-    await using var conn = new NpgsqlConnection(ConnectionString);
+    await using var conn = new NpgsqlConnection(pgConnectionString);
     await conn.OpenAsync();
     await using var tx = await conn.BeginTransactionAsync();
 

@@ -23,7 +23,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\WorkerSagaDemo.Api\WorkerSagaDemo.Api.csproj" />
-    <ProjectReference Include="..\WorkerSagaDemo.Worker\WorkerSagaDemo.Worker.csproj" />
+    <ProjectReference Include="..\WorkerSagaDemo.Worker\WorkerSagaDemo.Worker.csproj">
+      <Aliases>Worker</Aliases>
+    </ProjectReference>
     <ProjectReference Include="..\WorkerSagaDemo.Contracts\WorkerSagaDemo.Contracts.csproj" />
   </ItemGroup>
 

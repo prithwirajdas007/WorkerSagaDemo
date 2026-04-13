@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\WorkerSagaDemo.Contracts\WorkerSagaDemo.Contracts.csproj" />
+    <ProjectReference Include="..\WorkerSagaDemo.ServiceDefaults\WorkerSagaDemo.ServiceDefaults.csproj" />
   </ItemGroup>
 
 </Project>

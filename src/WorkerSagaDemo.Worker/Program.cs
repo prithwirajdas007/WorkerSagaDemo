@@ -1,27 +1,43 @@
+using JasperFx;
 using Marten;
 using Microsoft.Extensions.Hosting;
 using Rebus.Config;
-using Rebus.RabbitMq;
 using Rebus.Persistence.InMem;
+using Rebus.RabbitMq;
 using Rebus.ServiceProvider;
 using WorkerSagaDemo.Worker.Handlers;
-using JasperFx;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Marten: same connection as API
+// Aspire service defaults: OpenTelemetry, health checks, service discovery.
+// Works on the generic host builder via the AddServiceDefaults extension
+// from WorkerSagaDemo.ServiceDefaults.
+builder.AddServiceDefaults();
+
+// Connection strings come from configuration:
+//   - Under Aspire, AppHost injects ConnectionStrings__worker_demo and
+//     ConnectionStrings__messaging environment variables.
+//   - Standalone, they fall back to appsettings.Development.json values.
+var pgConnectionString = builder.Configuration.GetConnectionString("worker-demo")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'worker-demo'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
+
+var rabbitConnectionString = builder.Configuration.GetConnectionString("messaging")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'messaging'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
+
+// Marten: same database as the API
 builder.Services.AddMarten(options =>
 {
-    options.Connection("Host=localhost;Port=5435;Database=worker_demo;Username=postgres;Password=postgres");
+    options.Connection(pgConnectionString);
     options.AutoCreateSchemaObjects = AutoCreate.All;
 });
 
-// Rebus: worker consumer with saga storage
+// Rebus: worker consumer with in-memory saga storage and timeout storage
 builder.Services.AddRebus(configure => configure
-    .Transport(t => t.UseRabbitMq(
-        "amqp://guest:guest@localhost:5675",
-        "worker-saga-demo-worker"
-    ))
+    .Transport(t => t.UseRabbitMq(rabbitConnectionString, "worker-saga-demo-worker"))
     .Sagas(s => s.StoreInMemory())
     .Timeouts(t => t.StoreInMemory())
     .Options(o =>
