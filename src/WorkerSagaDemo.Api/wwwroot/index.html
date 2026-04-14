@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WorkerSagaDemo — Live Job Status</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-alt: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #7ee787;
+    --yellow: #f0883e;
+    --red: #ff7b72;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 20px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .container { max-width: 720px; margin: 0 auto; }
+  h1 { color: var(--accent); margin-top: 0; }
+  .connection {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+  .connection.connected { background: rgba(126, 231, 135, 0.15); color: var(--green); }
+  .connection.disconnected { background: rgba(255, 123, 114, 0.15); color: var(--red); }
+  button {
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-bottom: 24px;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .job {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+  }
+  .job-id {
+    font-family: "Cascadia Code", "Fira Code", monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .job-status { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .job-status.queued { color: var(--text-dim); }
+  .job-status.processing { color: var(--yellow); }
+  .job-status.completed { color: var(--green); }
+  .job-status.failed { color: var(--red); }
+  .progress {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .job-meta { font-size: 12px; color: var(--text-dim); }
+  .log {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-top: 32px;
+    font-family: "Cascadia Code", monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .log-entry { margin-bottom: 4px; }
+  .log-time { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>WorkerSagaDemo — Live Job Status</h1>
+  <div id="connection" class="connection disconnected">⚫ Disconnected</div>
+  <br>
+  <button id="createBtn" disabled>Create New Job</button>
+  <div id="jobs"></div>
+  <div class="log" id="log">
+    <div class="log-entry">SignalR event log…</div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+<script>
+  const jobs = new Map();
+  const jobsEl = document.getElementById('jobs');
+  const connectionEl = document.getElementById('connection');
+  const createBtn = document.getElementById('createBtn');
+  const logEl = document.getElementById('log');
+
+  function log(msg) {
+    const time = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = '<span class="log-time">[' + time + ']</span> ' + msg;
+    logEl.appendChild(entry);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function renderJobs() {
+    jobsEl.innerHTML = '';
+    const sorted = Array.from(jobs.values()).sort((a, b) => b.createdAt - a.createdAt);
+    for (const job of sorted) {
+      const pct = job.totalSteps > 0 ? Math.round((job.completedSteps / job.totalSteps) * 100) : 0;
+      let statusClass = 'queued';
+      if (job.status && job.status.startsWith('Processing')) statusClass = 'processing';
+      else if (job.status === 'Completed') statusClass = 'completed';
+      else if (job.status === 'Failed') statusClass = 'failed';
+
+      const div = document.createElement('div');
+      div.className = 'job';
+      div.innerHTML =
+        '<div class="job-id">' + job.jobId + '</div>' +
+        '<div class="job-status ' + statusClass + '">' + (job.status || 'Queued') + '</div>' +
+        '<div class="progress"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="job-meta">' + job.completedSteps + '/' + job.totalSteps + ' steps · updated ' + job.lastUpdate.toLocaleTimeString() + '</div>';
+      jobsEl.appendChild(div);
+    }
+  }
+
+  const connection = new signalR.HubConnectionBuilder()
+    .withUrl('/hubs/jobs')
+    .withAutomaticReconnect()
+    .build();
+
+  connection.on('JobStatusChanged', (msg) => {
+    log('JobStatusChanged: ' + msg.jobId.substring(0,8) + '… → ' + msg.status + ' (' + msg.completedSteps + '/' + msg.totalSteps + ')');
+    const existing = jobs.get(msg.jobId) || { jobId: msg.jobId, createdAt: Date.now() };
+    existing.status = msg.status;
+    existing.completedSteps = msg.completedSteps;
+    existing.totalSteps = msg.totalSteps;
+    existing.lastUpdate = new Date();
+    jobs.set(msg.jobId, existing);
+    renderJobs();
+  });
+
+  connection.onreconnecting(() => {
+    connectionEl.textContent = '🟡 Reconnecting…';
+    connectionEl.className = 'connection disconnected';
+  });
+  connection.onreconnected(() => {
+    connectionEl.textContent = '🟢 Connected';
+    connectionEl.className = 'connection connected';
+  });
+  connection.onclose(() => {
+    connectionEl.textContent = '⚫ Disconnected';
+    connectionEl.className = 'connection disconnected';
+    createBtn.disabled = true;
+  });
+
+  connection.start()
+    .then(() => {
+      connectionEl.textContent = '🟢 Connected';
+      connectionEl.className = 'connection connected';
+      createBtn.disabled = false;
+      log('SignalR connected to /hubs/jobs');
+    })
+    .catch(err => {
+      log('SignalR connection failed: ' + err);
+      console.error(err);
+    });
+
+  createBtn.addEventListener('click', async () => {
+    createBtn.disabled = true;
+    try {
+      const resp = await fetch('/jobs', { method: 'POST' });
+      const data = await resp.json();
+      log('POST /jobs created ' + data.id.substring(0,8) + '…');
+      jobs.set(data.id, {
+        jobId: data.id,
+        status: data.status,
+        completedSteps: 0,
+        totalSteps: 3,
+        createdAt: Date.now(),
+        lastUpdate: new Date()
+      });
+      renderJobs();
+    } catch (err) {
+      log('POST /jobs failed: ' + err);
+    }
+    createBtn.disabled = false;
+  });
+</script>
+</body>
+</html>

@@ -1,30 +1,70 @@
+using JasperFx;
 using Marten;
+using Marten.Services;
+using Npgsql;
 using Rebus.Bus;
 using Rebus.Config;
+using Rebus.Config.Outbox;
+using Rebus.Handlers;
+using Rebus.PostgreSql.Outbox;
 using Rebus.RabbitMq;
 using Rebus.Routing.TypeBased;
 using Rebus.ServiceProvider;
+using Rebus.Transport;
+using WorkerSagaDemo.Api;
 using WorkerSagaDemo.Contracts.Contracts;
 using WorkerSagaDemo.Contracts.Domain;
-using JasperFx;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Aspire service defaults: OpenTelemetry, health checks, service discovery.
+// When running under AppHost, all of these wire up automatically.
+// When running standalone (e.g. dotnet run from this project directly with
+// docker compose), this is still safe -- it just won't see Aspire-injected
+// telemetry endpoints.
+builder.AddServiceDefaults();
+
+// Connection strings come from configuration:
+//   - Under Aspire (dotnet run --project src/WorkerSagaDemo.AppHost), AppHost
+//     injects ConnectionStrings__worker_demo and ConnectionStrings__messaging
+//     environment variables pointing at Aspire-managed containers.
+//   - Standalone (dotnet run from this project), they fall back to the values
+//     in appsettings.Development.json which point at docker-compose containers
+//     on the well-known ports.
+var pgConnectionString = builder.Configuration.GetConnectionString("worker-demo")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'worker-demo'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
+
+var rabbitConnectionString = builder.Configuration.GetConnectionString("messaging")
+    ?? throw new InvalidOperationException(
+        "Missing connection string 'messaging'. Set it in appsettings.Development.json " +
+        "or run via the Aspire AppHost project.");
+
 builder.Services.AddOpenApi();
+
+// SignalR: real-time push to browser clients
+builder.Services.AddSignalR();
 
 // Marten: document store backed by PostgreSQL
 builder.Services.AddMarten(options =>
 {
-    options.Connection("Host=localhost;Port=5435;Database=worker_demo;Username=postgres;Password=postgres");
+    options.Connection(pgConnectionString);
     options.AutoCreateSchemaObjects = AutoCreate.All;
 });
 
-// Rebus: message bus
+// Register the Rebus handler that forwards JobStatusChanged events to SignalR.
+// AutoRegisterHandlersFromAssemblyOf picks up any IHandleMessages<T> in this assembly.
+builder.Services.AutoRegisterHandlersFromAssemblyOf<JobStatusChangedHandler>();
+
+// Rebus: message bus with Postgres-backed transactional outbox.
+// Messages sent inside a RebusTransactionScope with UseOutbox() are stored in
+// the outbox table and forwarded to RabbitMQ by a background sender. If
+// RabbitMQ is unreachable, the message survives in Postgres and is delivered
+// once connectivity is restored.
 builder.Services.AddRebus(configure => configure
-    .Transport(t => t.UseRabbitMq(
-        "amqp://guest:guest@localhost:5675",
-        "worker-saga-demo-api"
-    ))
+    .Transport(t => t.UseRabbitMq(rabbitConnectionString, "worker-saga-demo-api"))
+    .Outbox(o => o.StoreInPostgreSql(pgConnectionString, "rebus_outbox"))
     .Routing(r => r.TypeBased()
         .Map<PingMessage>("worker-saga-demo-worker")
         .Map<StartJobCommand>("worker-saga-demo-worker")
@@ -33,12 +73,32 @@ builder.Services.AddRebus(configure => configure
 
 var app = builder.Build();
 
+// Aspire-provided endpoints: /health, /alive, etc.
+app.MapDefaultEndpoints();
+
+// Subscribe to JobStatusChanged events published by the Worker's saga.
+// Rebus pub/sub: when any service publishes JobStatusChanged, RabbitMQ
+// routes a copy to every subscriber's input queue. The API's queue is
+// "worker-saga-demo-api".
+using (var scope = app.Services.CreateScope())
+{
+    var bus = scope.ServiceProvider.GetRequiredService<IBus>();
+    await bus.Subscribe<JobStatusChanged>();
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-// Keep old ping endpoint
+// Serve the static demo page (wwwroot/index.html) at the root URL
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// SignalR hub endpoint -- browser connects to ws://localhost:5041/hubs/jobs
+app.MapHub<JobHub>("/hubs/jobs");
+
+// Ping endpoint (not transactional, for connectivity checks)
 app.MapPost("/ping", async (IBus bus) =>
 {
     var id = Guid.NewGuid();
@@ -46,9 +106,23 @@ app.MapPost("/ping", async (IBus bus) =>
     return Results.Accepted(value: new { id });
 });
 
-// Create a Job, store in Marten, send command to Worker
-app.MapPost("/jobs", async (IBus bus, IDocumentSession session) =>
+// Create a Job, store in Marten, send command to Worker -- transactionally.
+// Both the Marten write and the Rebus outbox insert happen inside the same
+// Npgsql transaction, so either both succeed or neither does.
+//
+// Note: pgConnectionString is captured by closure from the local variable
+// declared above, so the same string used by AddMarten and the outbox is
+// used here for the raw NpgsqlConnection.
+app.MapPost("/jobs", async (IBus bus, IDocumentStore store) =>
 {
+    await using var conn = new NpgsqlConnection(pgConnectionString);
+    await conn.OpenAsync();
+    await using var tx = await conn.BeginTransactionAsync();
+
+    // Open a Marten session enlisted in our transaction
+    var session = store.LightweightSession(Marten.Services.SessionOptions.ForTransaction(tx));
+    await using var _ = session;
+
     var job = new Job
     {
         Id = Guid.NewGuid(),
@@ -64,7 +138,15 @@ app.MapPost("/jobs", async (IBus bus, IDocumentSession session) =>
 
     session.Store(job);
     await session.SaveChangesAsync();
+
+    // Enlist Rebus in the same Npgsql transaction via the outbox
+    using var rebusScope = new RebusTransactionScope();
+    rebusScope.UseOutbox(conn, tx);
+
     await bus.Send(new StartJobCommand(job.Id));
+
+    await rebusScope.CompleteAsync();
+    await tx.CommitAsync();
 
     return Results.Accepted(value: new { job.Id, job.Status });
 });

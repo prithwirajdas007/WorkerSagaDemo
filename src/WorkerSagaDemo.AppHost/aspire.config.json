@@ -1,0 +1,5 @@
+{
+  "appHost": {
+    "path": "WorkerSagaDemo.AppHost.csproj"
+  }
+}
