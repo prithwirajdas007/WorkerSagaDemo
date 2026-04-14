@@ -1,6 +1,16 @@
 @WorkerSagaDemo.Api_HostAddress = http://localhost:5041
 
-GET {{WorkerSagaDemo.Api_HostAddress}}/weatherforecast/
+POST {{WorkerSagaDemo.Api_HostAddress}}/ping
+Accept: application/json
+
+###
+
+POST {{WorkerSagaDemo.Api_HostAddress}}/jobs
+Accept: application/json
+
+###
+
+GET {{WorkerSagaDemo.Api_HostAddress}}/jobs/{{jobId}}
 Accept: application/json
 
 ###

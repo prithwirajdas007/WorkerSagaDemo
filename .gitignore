@@ -1,25 +1,6 @@
-## .NET
-bin/
-obj/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-
-## Visual Studio
-.vs/
-*.DotSettings.user
-
-## Rider
-.idea/
-
-## OS
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-.DS_Store
-
-## Build
+## .NET build artifacts
+[Bb]in/
+[Oo]bj/
 [Dd]ebug/
 [Rr]elease/
 x64/
@@ -27,8 +8,6 @@ x86/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
 bld/
-[Bb]in/
-[Oo]bj/
 [Ll]og/
 [Ll]ogs/
 
@@ -37,13 +16,46 @@ bld/
 **/[Pp]ackages/*
 !**/[Pp]ackages/build/
 
-## Test Results
+## Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+## JetBrains Rider
+.idea/
+
+## VS Code
+.vscode/
+
+## OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+## Test results
 [Tt]est[Rr]esult*/
 [Bb]uild[Ll]og.*
 TestResult.xml
+coverage/
+*.coveragexml
 
-## Personal / local-only (not committed)
+## Publish output
+publish/
+
+## User secrets
+secrets.json
+
+## Personal / session-only docs (not part of the project)
 WALKTHROUGH.md
 CATCH-UP-PROMPT.md
 NEXT-SESSION-PROMPT.md
+STEP*-HANDOFF.md
+CONCEPTS.html
 .claude/
+
+## Aspire
+aspire-manifest.json

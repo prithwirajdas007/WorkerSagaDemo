@@ -1,3 +1,5 @@
+extern alias Worker;
+
 using Marten;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -5,7 +7,7 @@ using Rebus.Bus;
 using Rebus.Sagas;
 using WorkerSagaDemo.Contracts.Contracts;
 using WorkerSagaDemo.Contracts.Domain;
-using WorkerSagaDemo.Worker.Sagas;
+using Worker::WorkerSagaDemo.Worker.Sagas;
 
 namespace WorkerSagaDemo.Tests.Sagas;
 
