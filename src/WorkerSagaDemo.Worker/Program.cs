@@ -1,12 +1,15 @@
 using JasperFx;
 using Marten;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using OpenTelemetry.Trace;
 using Rebus.Config;
 using Rebus.Persistence.InMem;
 using Rebus.RabbitMq;
 using Rebus.ServiceProvider;
 using WorkerSagaDemo.Worker;
+using WorkerSagaDemo.Worker.Ai;
 using WorkerSagaDemo.Worker.Handlers;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -65,5 +68,41 @@ builder.Services.AddRebus(configure => configure
 
 builder.Services.AutoRegisterHandlersFromAssemblyOf<PingMessageHandler>();
 
+// AI service for the saga's Classify step (Session A: smoke test only,
+// not yet called by the saga). Registered as a singleton because the
+// Kernel is expensive to build and safe to share across threads.
+builder.Services.AddSingleton<IJobAiService, OllamaJobAiService>();
+
 var host = builder.Build();
+
+// Startup smoke test for the AI service. Runs once before the Worker
+// starts consuming messages, logs success or a warning on failure, and
+// NEVER crashes the worker if Ollama is unreachable. The saga's Classify
+// step (added in a later session) will degrade gracefully if the service
+// is down.
+using (var scope = host.Services.CreateScope())
+{
+    var aiService = scope.ServiceProvider.GetRequiredService<IJobAiService>();
+    var aiLogger = scope.ServiceProvider.GetRequiredService<ILogger<OllamaJobAiService>>();
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    try
+    {
+        var response = await aiService.PingAsync();
+        sw.Stop();
+        aiLogger.LogInformation(
+            "AI smoke test OK. Model responded in {Elapsed}ms with: {Response}",
+            sw.ElapsedMilliseconds,
+            response);
+    }
+    catch (Exception ex)
+    {
+        sw.Stop();
+        aiLogger.LogWarning(ex,
+            "AI smoke test FAILED after {Elapsed}ms. Classifier will be unavailable " +
+            "until the AI service is reachable. This is non-fatal; the worker will " +
+            "continue to process messages normally.",
+            sw.ElapsedMilliseconds);
+    }
+}
+
 host.Run();

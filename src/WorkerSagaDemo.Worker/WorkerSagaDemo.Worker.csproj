@@ -1,8 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
+  <PropertyGroup>
+    <!-- Suppress Semantic Kernel experimental-API warnings (Ollama connector is marked SKEXP0070) -->
+    <NoWarn>$(NoWarn);SKEXP0070</NoWarn>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Marten" Version="8.28.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.74.0" />
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Ollama" Version="1.74.0-alpha" />
     <PackageReference Include="Rebus" Version="8.9.0" />
     <PackageReference Include="Rebus.RabbitMq" Version="10.1.0" />
     <PackageReference Include="Rebus.ServiceProvider" Version="10.7.0" />
