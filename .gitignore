@@ -55,7 +55,11 @@ CATCH-UP-PROMPT.md
 NEXT-SESSION-PROMPT.md
 STEP*-HANDOFF.md
 CONCEPTS.html
-.claude/
+
+## Claude Code: ignore session/config files but allow the Aspire-generated skill file
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 ## Aspire
 aspire-manifest.json
