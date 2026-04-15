@@ -6,17 +6,32 @@ namespace WorkerSagaDemo.Worker.Ai;
 /// so the underlying provider (Ollama, OpenAI, Bedrock, Azure OpenAI) can
 /// be swapped by changing the DI registration without touching the saga.
 ///
-/// Session A scope: only PingAsync is defined. Later sessions add
-/// ClassifyTradeAsync and other business methods.
+/// Session B scope: ClassifyTradeAsync is the only method. PingAsync from
+/// Session A is removed -- the startup smoke test now calls ClassifyTradeAsync
+/// with a hardcoded example trade, which exercises the same connectivity
+/// path plus the parsing logic.
 /// </summary>
 public interface IJobAiService
 {
     /// <summary>
-    /// Smoke test -- asks the model to reply with "OK". Returns the actual
-    /// response string (which may not literally be "OK" -- models don't always
-    /// follow instructions perfectly). Throws if the provider is unreachable
-    /// or misconfigured; callers should handle exceptions and degrade
-    /// gracefully.
+    /// Classifies a free-text trade description into a structured
+    /// Classification. The implementation prompts the model to return
+    /// JSON matching the Classification shape and parses defensively.
+    ///
+    /// Failure modes:
+    /// - Provider unreachable: throws ClassifierUnavailableException
+    /// - Response not parseable as JSON (after one retry): throws
+    ///   ClassifierParseException
+    /// - JSON missing required fields: throws ClassifierParseException
+    /// - Category or RiskTier not in enum: returns Unknown, NOT an exception
+    ///
+    /// Callers should catch ClassifierUnavailableException and degrade
+    /// gracefully (e.g. mark the step as needing manual classification).
+    /// ClassifierParseException is generally a model quality issue and
+    /// indicates a bad input or a model that can't follow the prompt.
     /// </summary>
-    Task<string> PingAsync(CancellationToken ct = default);
+    /// <param name="description">Free-text trade description, e.g.
+    /// "5Y IRS, USD 50M notional, SOFR vs fixed 4.25%"</param>
+    /// <param name="ct">Cancellation token</param>
+    Task<Classification> ClassifyTradeAsync(string description, CancellationToken ct = default);
 }

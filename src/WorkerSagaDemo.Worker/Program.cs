@@ -85,20 +85,24 @@ using (var scope = host.Services.CreateScope())
     var aiService = scope.ServiceProvider.GetRequiredService<IJobAiService>();
     var aiLogger = scope.ServiceProvider.GetRequiredService<ILogger<OllamaJobAiService>>();
     var sw = System.Diagnostics.Stopwatch.StartNew();
+    const string SmokeTestTrade = "5Y IRS, USD 50M notional, SOFR vs fixed 4.25%";
     try
     {
-        var response = await aiService.PingAsync();
+        var classification = await aiService.ClassifyTradeAsync(SmokeTestTrade);
         sw.Stop();
         aiLogger.LogInformation(
-            "AI smoke test OK. Model responded in {Elapsed}ms with: {Response}",
+            "AI classifier smoke test OK in {Elapsed}ms. Input: \"{Input}\" => Category={Category}, RiskTier={RiskTier}, Rationale=\"{Rationale}\"",
             sw.ElapsedMilliseconds,
-            response);
+            SmokeTestTrade,
+            classification.Category,
+            classification.RiskTier,
+            classification.Rationale);
     }
     catch (Exception ex)
     {
         sw.Stop();
         aiLogger.LogWarning(ex,
-            "AI smoke test FAILED after {Elapsed}ms. Classifier will be unavailable " +
+            "AI classifier smoke test FAILED after {Elapsed}ms. Classifier will be unavailable " +
             "until the AI service is reachable. This is non-fatal; the worker will " +
             "continue to process messages normally.",
             sw.ElapsedMilliseconds);
