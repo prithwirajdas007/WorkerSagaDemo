@@ -161,7 +161,7 @@ app.MapPost("/jobs", async (IBus bus, IDocumentStore store) =>
     await rebusScope.CompleteAsync();
     await tx.CommitAsync();
 
-    return Results.Accepted(value: new { job.Id, job.Status });
+    return Results.Accepted(value: new { job.Id, job.Status, job.Description });
 });
 
 // Read a Job back

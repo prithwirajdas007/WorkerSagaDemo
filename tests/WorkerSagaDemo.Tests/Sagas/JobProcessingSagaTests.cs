@@ -19,11 +19,11 @@ public class JobProcessingSagaTests
     private readonly Mock<IBus> _busMock = new();
     private readonly Mock<IJobAiService> _aiServiceMock = new();
     private readonly List<(TimeSpan Delay, object Message)> _deferred = new();
+    private readonly List<object> _published = new();
 
     public JobProcessingSagaTests()
     {
         // Default AI classification result for all tests unless overridden.
-        // This ensures existing saga tests pass without caring about classification.
         _aiServiceMock
             .Setup(ai => ai.ClassifyTradeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new Classification(
@@ -39,6 +39,14 @@ public class JobProcessingSagaTests
             .Returns<TimeSpan, object, IDictionary<string, string>>((delay, msg, _) =>
             {
                 _deferred.Add((delay, msg));
+                return Task.CompletedTask;
+            });
+
+        _busMock
+            .Setup(b => b.Publish(It.IsAny<object>(), It.IsAny<IDictionary<string, string>>()))
+            .Returns<object, IDictionary<string, string>>((msg, _) =>
+            {
+                _published.Add(msg);
                 return Task.CompletedTask;
             });
 
@@ -70,7 +78,7 @@ public class JobProcessingSagaTests
     }
 
     // ---------------------------------------------------------------
-    // Existing saga tests (updated for new constructor + Description)
+    // Existing saga tests
     // ---------------------------------------------------------------
 
     [Fact]
@@ -189,7 +197,7 @@ public class JobProcessingSagaTests
     }
 
     // ---------------------------------------------------------------
-    // New classification tests (Session C)
+    // Classification tests (Session C + D)
     // ---------------------------------------------------------------
 
     [Fact]
@@ -213,6 +221,9 @@ public class JobProcessingSagaTests
         Assert.Equal("CreditDefaultSwap", data.TradeCategory);
         Assert.Equal("High", data.RiskTier);
         Assert.Equal("CDS on investment-grade corporate", data.ClassificationRationale);
+        // Classification also persisted on Job document
+        Assert.Equal("CreditDefaultSwap", job.TradeCategory);
+        Assert.Equal("High", job.RiskTier);
         // Still scheduled normal steps
         Assert.Equal(2, _deferred.Count);
     }
@@ -237,6 +248,9 @@ public class JobProcessingSagaTests
         Assert.Equal("Unknown", data.TradeCategory);
         Assert.Equal("Unknown", data.RiskTier);
         Assert.Equal("Classifier unavailable", data.ClassificationRationale);
+        // Unknown also persisted on Job document
+        Assert.Equal("Unknown", job.TradeCategory);
+        Assert.Equal("Unknown", job.RiskTier);
         // Steps were still scheduled despite classification failure
         Assert.Equal(2, _deferred.Count);
     }
@@ -261,5 +275,34 @@ public class JobProcessingSagaTests
             Times.Never);
         // Steps were still scheduled
         Assert.Equal(2, _deferred.Count);
+    }
+
+    [Fact]
+    public async Task Handle_ProcessJobStep_PublishesEnrichedStatusChanged()
+    {
+        var jobId = Guid.NewGuid();
+        var job = CreateTestJob(jobId, "5Y IRS test");
+        job.TradeCategory = "InterestRateSwap";
+        job.RiskTier = "Medium";
+        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
+
+        var sagaData = new JobProcessingSagaData
+        {
+            JobId = jobId,
+            TotalSteps = 3,
+            CompletedSteps = 0,
+            TradeCategory = "InterestRateSwap",
+            RiskTier = "Medium"
+        };
+        var saga = CreateSaga(sagaData);
+
+        await saga.Handle(new ProcessJobStep(jobId, 0));
+
+        // Verify the published event carries enrichment fields
+        Assert.NotEmpty(_published);
+        var evt = Assert.IsType<JobStatusChanged>(_published[0]);
+        Assert.Equal("5Y IRS test", evt.Description);
+        Assert.Equal("InterestRateSwap", evt.TradeCategory);
+        Assert.Equal("Medium", evt.RiskTier);
     }
 }

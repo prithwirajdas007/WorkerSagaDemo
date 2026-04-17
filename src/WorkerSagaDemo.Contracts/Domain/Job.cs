@@ -5,6 +5,8 @@ public class Job
     public Guid Id { get; set; }
     public string Status { get; set; } = "Queued";
     public string? Description { get; set; }
+    public string? TradeCategory { get; set; }
+    public string? RiskTier { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public List<JobStep> Steps { get; set; } = new();

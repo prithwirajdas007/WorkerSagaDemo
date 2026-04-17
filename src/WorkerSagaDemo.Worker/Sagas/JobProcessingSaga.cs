@@ -85,6 +85,13 @@ public class JobProcessingSaga :
                 Data.RiskTier = classification.RiskTier.ToString();
                 Data.ClassificationRationale = classification.Rationale;
 
+                // Persist classification on the Job document so GET /jobs/{id}
+                // returns it and the UI can display it.
+                job.TradeCategory = Data.TradeCategory;
+                job.RiskTier = Data.RiskTier;
+                _session.Store(job);
+                await _session.SaveChangesAsync();
+
                 classifyActivity?.SetTag(SagaTelemetry.TagTradeCategory, Data.TradeCategory);
                 classifyActivity?.SetTag(SagaTelemetry.TagRiskTier, Data.RiskTier);
                 classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "classified");
@@ -99,6 +106,11 @@ public class JobProcessingSaga :
                 Data.RiskTier = "Unknown";
                 Data.ClassificationRationale = "Classifier unavailable";
 
+                job.TradeCategory = Data.TradeCategory;
+                job.RiskTier = Data.RiskTier;
+                _session.Store(job);
+                await _session.SaveChangesAsync();
+
                 classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classifier unavailable");
                 classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "classifier-unavailable");
 
@@ -111,6 +123,11 @@ public class JobProcessingSaga :
                 Data.TradeCategory = "Unknown";
                 Data.RiskTier = "Unknown";
                 Data.ClassificationRationale = $"Parse error: {ex.Message}";
+
+                job.TradeCategory = Data.TradeCategory;
+                job.RiskTier = Data.RiskTier;
+                _session.Store(job);
+                await _session.SaveChangesAsync();
 
                 classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classification parse error");
                 classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "parse-error");
@@ -252,5 +269,8 @@ public class JobProcessingSaga :
             job.Status,
             Data.CompletedSteps,
             Data.TotalSteps,
-            DateTimeOffset.UtcNow));
+            DateTimeOffset.UtcNow,
+            job.Description,
+            Data.TradeCategory,
+            Data.RiskTier));
 }
