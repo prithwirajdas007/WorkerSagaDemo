@@ -6,6 +6,7 @@ using Rebus.Handlers;
 using Rebus.Sagas;
 using WorkerSagaDemo.Contracts.Contracts;
 using WorkerSagaDemo.Contracts.Domain;
+using WorkerSagaDemo.Worker.Ai;
 
 namespace WorkerSagaDemo.Worker.Sagas;
 
@@ -18,12 +19,18 @@ public class JobProcessingSaga :
     private readonly IDocumentSession _session;
     private readonly ILogger<JobProcessingSaga> _logger;
     private readonly IBus _bus;
+    private readonly IJobAiService _aiService;
 
-    public JobProcessingSaga(IDocumentSession session, ILogger<JobProcessingSaga> logger, IBus bus)
+    public JobProcessingSaga(
+        IDocumentSession session,
+        ILogger<JobProcessingSaga> logger,
+        IBus bus,
+        IJobAiService aiService)
     {
         _session = session;
         _logger = logger;
         _bus = bus;
+        _aiService = aiService;
     }
 
     protected override void CorrelateMessages(ICorrelationConfig<JobProcessingSagaData> config)
@@ -35,11 +42,6 @@ public class JobProcessingSaga :
 
     public async Task Handle(StartJobCommand message)
     {
-        // Open an OpenTelemetry span that covers the entire handler.
-        // ActivityKind.Consumer means "this is work triggered by an incoming
-        // message" -- distinct from Server (HTTP request) or Internal.
-        // StartActivity returns null if nothing is listening; the null-conditional
-        // operators below handle that gracefully.
         using var activity = SagaTelemetry.ActivitySource.StartActivity(
             "Saga.StartJobCommand",
             ActivityKind.Consumer);
@@ -61,6 +63,68 @@ public class JobProcessingSaga :
         Data.CompletedSteps = 0;
 
         activity?.SetTag(SagaTelemetry.TagStepCount, Data.TotalSteps);
+
+        // --- AI Classification (Session C) ---
+        // Classify the trade description before scheduling processing steps.
+        // This is a non-blocking enrichment: if the classifier is down or the
+        // description is missing, the saga continues with Unknown classification.
+        // The classification result is stored on saga data for later use (e.g.
+        // routing, priority, UI display).
+        if (!string.IsNullOrWhiteSpace(job.Description))
+        {
+            using var classifyActivity = SagaTelemetry.ActivitySource.StartActivity(
+                "Saga.ClassifyTrade",
+                ActivityKind.Internal);
+            classifyActivity?.SetTag(SagaTelemetry.TagJobId, message.JobId);
+
+            try
+            {
+                var classification = await _aiService.ClassifyTradeAsync(job.Description);
+
+                Data.TradeCategory = classification.Category.ToString();
+                Data.RiskTier = classification.RiskTier.ToString();
+                Data.ClassificationRationale = classification.Rationale;
+
+                classifyActivity?.SetTag(SagaTelemetry.TagTradeCategory, Data.TradeCategory);
+                classifyActivity?.SetTag(SagaTelemetry.TagRiskTier, Data.RiskTier);
+                classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "classified");
+
+                _logger.LogInformation(
+                    "Job {JobId} classified: Category={Category}, RiskTier={RiskTier}, Rationale=\"{Rationale}\"",
+                    message.JobId, Data.TradeCategory, Data.RiskTier, classification.Rationale);
+            }
+            catch (ClassifierUnavailableException ex)
+            {
+                Data.TradeCategory = "Unknown";
+                Data.RiskTier = "Unknown";
+                Data.ClassificationRationale = "Classifier unavailable";
+
+                classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classifier unavailable");
+                classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "classifier-unavailable");
+
+                _logger.LogWarning(ex,
+                    "Job {JobId} classification failed (classifier unavailable). Continuing with Unknown.",
+                    message.JobId);
+            }
+            catch (ClassifierParseException ex)
+            {
+                Data.TradeCategory = "Unknown";
+                Data.RiskTier = "Unknown";
+                Data.ClassificationRationale = $"Parse error: {ex.Message}";
+
+                classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classification parse error");
+                classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "parse-error");
+
+                _logger.LogWarning(ex,
+                    "Job {JobId} classification failed (parse error). Continuing with Unknown.",
+                    message.JobId);
+            }
+        }
+        else
+        {
+            _logger.LogDebug("Job {JobId} has no description, skipping classification", message.JobId);
+        }
+        // --- End AI Classification ---
 
         await _bus.DeferLocal(TimeSpan.FromSeconds(30), new JobTimedOut(message.JobId));
         await _bus.DeferLocal(TimeSpan.FromSeconds(1), new ProcessJobStep(message.JobId, 0));
@@ -122,10 +186,6 @@ public class JobProcessingSaga :
 
         await PublishStatusChangedAsync(job);
 
-        // Simulate the real work this step would do (e.g. calling an external
-        // service, running a computation, talking to a database). Wrapped in
-        // its own nested span so the timing of the "work" is isolated from
-        // the surrounding Marten I/O.
         using (var workActivity = SagaTelemetry.ActivitySource.StartActivity(
             $"Saga.Work.{step.Name}",
             ActivityKind.Internal))
@@ -182,17 +242,10 @@ public class JobProcessingSaga :
         Data.IsComplete = true;
         MarkAsComplete();
 
-        // SetStatus on Activity uses OTel's Error status, which the Aspire
-        // dashboard renders with a red badge. This makes failed sagas
-        // immediately visible in the Traces tab.
         activity?.SetStatus(ActivityStatusCode.Error, "Saga timed out");
         activity?.SetTag(SagaTelemetry.TagOutcome, "timed-out");
     }
 
-    /// <summary>
-    /// Publishes a JobStatusChanged event so subscribers (the API's SignalR
-    /// forwarder) can push real-time updates to connected browser clients.
-    /// </summary>
     private Task PublishStatusChangedAsync(Job job) =>
         _bus.Publish(new JobStatusChanged(
             job.Id,

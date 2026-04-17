@@ -4,6 +4,7 @@ public class Job
 {
     public Guid Id { get; set; }
     public string Status { get; set; } = "Queued";
+    public string? Description { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public List<JobStep> Steps { get; set; } = new();

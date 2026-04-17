@@ -123,10 +123,23 @@ app.MapPost("/jobs", async (IBus bus, IDocumentStore store) =>
     var session = store.LightweightSession(Marten.Services.SessionOptions.ForTransaction(tx));
     await using var _ = session;
 
+    // Sample trade descriptions that exercise all classifier categories.
+    // Rotated randomly so the demo is interesting without UI changes.
+    // Session D adds a text input for user-supplied descriptions.
+    var sampleDescriptions = new[]
+    {
+        "5Y IRS, USD 50M notional, SOFR vs fixed 4.25%",
+        "EURUSD 6M forward, EUR 10M notional, fixing March 2027",
+        "5Y CDS on JPMorgan, USD 25M notional, 100bps spread",
+        "AAPL equity call option, 1000 contracts, strike $200, June 2027 expiry",
+        "WTI crude oil swap, 10K barrels/month, 12M tenor, fixed at $78/bbl",
+    };
+
     var job = new Job
     {
         Id = Guid.NewGuid(),
         Status = "Queued",
+        Description = sampleDescriptions[Random.Shared.Next(sampleDescriptions.Length)],
         CreatedAt = DateTimeOffset.UtcNow,
         Steps = new List<JobStep>
         {

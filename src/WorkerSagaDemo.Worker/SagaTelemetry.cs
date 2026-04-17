@@ -35,4 +35,8 @@ public static class SagaTelemetry
     public const string TagStepCount = "saga.total_steps";
     public const string TagCompletedSteps = "saga.completed_steps";
     public const string TagOutcome = "saga.outcome";
+
+    // Classification-specific tags (Session C)
+    public const string TagTradeCategory = "saga.trade_category";
+    public const string TagRiskTier = "saga.risk_tier";
 }

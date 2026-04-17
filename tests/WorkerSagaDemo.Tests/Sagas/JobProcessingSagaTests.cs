@@ -7,6 +7,7 @@ using Rebus.Bus;
 using Rebus.Sagas;
 using WorkerSagaDemo.Contracts.Contracts;
 using WorkerSagaDemo.Contracts.Domain;
+using Worker::WorkerSagaDemo.Worker.Ai;
 using Worker::WorkerSagaDemo.Worker.Sagas;
 
 namespace WorkerSagaDemo.Tests.Sagas;
@@ -16,7 +17,20 @@ public class JobProcessingSagaTests
     private readonly Mock<IDocumentSession> _sessionMock = new();
     private readonly Mock<ILogger<JobProcessingSaga>> _loggerMock = new();
     private readonly Mock<IBus> _busMock = new();
+    private readonly Mock<IJobAiService> _aiServiceMock = new();
     private readonly List<(TimeSpan Delay, object Message)> _deferred = new();
+
+    public JobProcessingSagaTests()
+    {
+        // Default AI classification result for all tests unless overridden.
+        // This ensures existing saga tests pass without caring about classification.
+        _aiServiceMock
+            .Setup(ai => ai.ClassifyTradeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Classification(
+                TradeCategory.InterestRateSwap,
+                RiskTier.Medium,
+                "Default test classification"));
+    }
 
     private JobProcessingSaga CreateSaga(JobProcessingSagaData? data = null)
     {
@@ -28,18 +42,23 @@ public class JobProcessingSagaTests
                 return Task.CompletedTask;
             });
 
-        var saga = new JobProcessingSaga(_sessionMock.Object, _loggerMock.Object, _busMock.Object);
+        var saga = new JobProcessingSaga(
+            _sessionMock.Object,
+            _loggerMock.Object,
+            _busMock.Object,
+            _aiServiceMock.Object);
         var sagaData = data ?? new JobProcessingSagaData();
         typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.SetValue(saga, sagaData);
         return saga;
     }
 
-    private Job CreateTestJob(Guid jobId)
+    private Job CreateTestJob(Guid jobId, string? description = "5Y IRS, USD 50M notional")
     {
         return new Job
         {
             Id = jobId,
             Status = "Queued",
+            Description = description,
             CreatedAt = DateTimeOffset.UtcNow,
             Steps = new List<JobStep>
             {
@@ -49,6 +68,10 @@ public class JobProcessingSagaTests
             }
         };
     }
+
+    // ---------------------------------------------------------------
+    // Existing saga tests (updated for new constructor + Description)
+    // ---------------------------------------------------------------
 
     [Fact]
     public async Task Handle_StartJobCommand_InitializesSagaState()
@@ -163,5 +186,80 @@ public class JobProcessingSagaTests
         await saga.Handle(new JobTimedOut(jobId));
 
         _sessionMock.Verify(s => s.LoadAsync<Job>(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ---------------------------------------------------------------
+    // New classification tests (Session C)
+    // ---------------------------------------------------------------
+
+    [Fact]
+    public async Task Handle_StartJobCommand_ClassifiesTradeDescription()
+    {
+        var jobId = Guid.NewGuid();
+        var job = CreateTestJob(jobId, "5Y CDS on JPMorgan, USD 25M notional");
+        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
+
+        _aiServiceMock
+            .Setup(ai => ai.ClassifyTradeAsync("5Y CDS on JPMorgan, USD 25M notional", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Classification(
+                TradeCategory.CreditDefaultSwap,
+                RiskTier.High,
+                "CDS on investment-grade corporate"));
+
+        var saga = CreateSaga();
+        await saga.Handle(new StartJobCommand(jobId));
+
+        var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
+        Assert.Equal("CreditDefaultSwap", data.TradeCategory);
+        Assert.Equal("High", data.RiskTier);
+        Assert.Equal("CDS on investment-grade corporate", data.ClassificationRationale);
+        // Still scheduled normal steps
+        Assert.Equal(2, _deferred.Count);
+    }
+
+    [Fact]
+    public async Task Handle_StartJobCommand_ClassifierUnavailable_ContinuesWithUnknown()
+    {
+        var jobId = Guid.NewGuid();
+        var job = CreateTestJob(jobId);
+        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
+
+        _aiServiceMock
+            .Setup(ai => ai.ClassifyTradeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new ClassifierUnavailableException(
+                "Connection refused",
+                new System.Net.Http.HttpRequestException()));
+
+        var saga = CreateSaga();
+        await saga.Handle(new StartJobCommand(jobId));
+
+        var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
+        Assert.Equal("Unknown", data.TradeCategory);
+        Assert.Equal("Unknown", data.RiskTier);
+        Assert.Equal("Classifier unavailable", data.ClassificationRationale);
+        // Steps were still scheduled despite classification failure
+        Assert.Equal(2, _deferred.Count);
+    }
+
+    [Fact]
+    public async Task Handle_StartJobCommand_NoDescription_SkipsClassification()
+    {
+        var jobId = Guid.NewGuid();
+        var job = CreateTestJob(jobId, description: null);
+        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
+
+        var saga = CreateSaga();
+        await saga.Handle(new StartJobCommand(jobId));
+
+        var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
+        Assert.Null(data.TradeCategory);
+        Assert.Null(data.RiskTier);
+        Assert.Null(data.ClassificationRationale);
+        // Classifier was never called
+        _aiServiceMock.Verify(
+            ai => ai.ClassifyTradeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        // Steps were still scheduled
+        Assert.Equal(2, _deferred.Count);
     }
 }
