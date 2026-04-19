@@ -111,5 +111,96 @@ public class JobApiTests : IAsyncLifetime
         Assert.Equal(3, returned.Steps.Count);
     }
 
+    [Fact]
+    public async Task GET_jobs_returns_description_and_classification_fields()
+    {
+        // Arrange: create a job with classification data (as the saga would)
+        var store = _host.Services.GetRequiredService<IDocumentStore>();
+        await using var session = store.LightweightSession();
+
+        var job = new Job
+        {
+            Id = Guid.NewGuid(),
+            Status = "Completed",
+            Description = "5Y IRS, USD 50M notional, SOFR vs fixed 4.25%",
+            TradeCategory = "InterestRateSwap",
+            RiskTier = "Medium",
+            CreatedAt = DateTimeOffset.UtcNow,
+            CompletedAt = DateTimeOffset.UtcNow,
+            Steps = new List<JobStep>
+            {
+                new() { Name = "Validate", Status = "Completed" },
+                new() { Name = "Process", Status = "Completed" },
+                new() { Name = "Finalize", Status = "Completed" }
+            }
+        };
+
+        session.Store(job);
+        await session.SaveChangesAsync();
+
+        // Act
+        var result = await _host.Scenario(s =>
+        {
+            s.Get.Url($"/jobs/{job.Id}");
+            s.StatusCodeShouldBe(200);
+        });
+
+        // Assert: verify classification fields round-trip through Marten
+        var returned = result.ReadAsJson<Job>();
+        Assert.NotNull(returned);
+        Assert.Equal("5Y IRS, USD 50M notional, SOFR vs fixed 4.25%", returned!.Description);
+        Assert.Equal("InterestRateSwap", returned.TradeCategory);
+        Assert.Equal("Medium", returned.RiskTier);
+        Assert.Equal("Completed", returned.Status);
+    }
+
+    [Fact]
+    public async Task GET_jobs_returns_null_classification_for_unclassified_job()
+    {
+        // Arrange: job without classification (pre-AI or no description)
+        var store = _host.Services.GetRequiredService<IDocumentStore>();
+        await using var session = store.LightweightSession();
+
+        var job = new Job
+        {
+            Id = Guid.NewGuid(),
+            Status = "Queued",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Steps = new List<JobStep>
+            {
+                new() { Name = "Validate" },
+                new() { Name = "Process" },
+                new() { Name = "Finalize" }
+            }
+        };
+
+        session.Store(job);
+        await session.SaveChangesAsync();
+
+        // Act
+        var result = await _host.Scenario(s =>
+        {
+            s.Get.Url($"/jobs/{job.Id}");
+            s.StatusCodeShouldBe(200);
+        });
+
+        // Assert: null fields should round-trip as null, not as empty strings
+        var returned = result.ReadAsJson<Job>();
+        Assert.NotNull(returned);
+        Assert.Null(returned!.Description);
+        Assert.Null(returned.TradeCategory);
+        Assert.Null(returned.RiskTier);
+    }
+
+    [Fact]
+    public async Task Health_endpoint_returns_200()
+    {
+        await _host.Scenario(s =>
+        {
+            s.Get.Url("/health");
+            s.StatusCodeShouldBe(200);
+        });
+    }
+
     private record JobResponse(Guid Id, string Status);
 }

@@ -63,3 +63,6 @@ CONCEPTS.html
 
 ## Aspire
 aspire-manifest.json
+
+## NBomber load test reports (generated, not committed)
+tests/WorkerSagaDemo.LoadTests/reports/
