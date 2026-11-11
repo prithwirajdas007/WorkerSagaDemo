@@ -49,17 +49,26 @@ public class JobProcessingSaga :
 
         _logger.LogInformation("Saga initiated for Job {JobId}", message.JobId);
 
-        var job = await _session.LoadAsync<Job>(message.JobId);
-        if (job is null)
+        // Everything this handler needs arrives on the message itself,
+        // composed inside the transaction that created the Job. Reading the
+        // document here would observe whatever it says NOW -- possibly
+        // amended while the command was in flight -- instead of what was
+        // true when the event was committed. The only document access below
+        // is a write (persisting classification results for the UI), never
+        // a read of state the snapshot already carries.
+        var snapshot = message.Snapshot;
+
+        if (snapshot.SchemaVersion > JobSnapshot.CurrentSchemaVersion)
         {
-            _logger.LogWarning("Job {JobId} not found, marking saga complete", message.JobId);
-            activity?.SetTag(SagaTelemetry.TagOutcome, "job-not-found");
-            MarkAsComplete();
-            return;
+            // A producer newer than this consumer: fail loudly (retry/error
+            // queue) rather than misinterpret a shape we do not understand.
+            throw new InvalidOperationException(
+                $"JobSnapshot schema version {snapshot.SchemaVersion} is newer than " +
+                $"the supported version {JobSnapshot.CurrentSchemaVersion}.");
         }
 
         Data.JobId = message.JobId;
-        Data.TotalSteps = job.Steps.Count;
+        Data.TotalSteps = snapshot.StepNames.Count;
         Data.CompletedSteps = 0;
 
         activity?.SetTag(SagaTelemetry.TagStepCount, Data.TotalSteps);
@@ -70,7 +79,7 @@ public class JobProcessingSaga :
         // description is missing, the saga continues with Unknown classification.
         // The classification result is stored on saga data for later use (e.g.
         // routing, priority, UI display).
-        if (!string.IsNullOrWhiteSpace(job.Description))
+        if (!string.IsNullOrWhiteSpace(snapshot.Description))
         {
             using var classifyActivity = SagaTelemetry.ActivitySource.StartActivity(
                 "Saga.ClassifyTrade",
@@ -79,18 +88,11 @@ public class JobProcessingSaga :
 
             try
             {
-                var classification = await _aiService.ClassifyTradeAsync(job.Description);
+                var classification = await _aiService.ClassifyTradeAsync(snapshot.Description);
 
                 Data.TradeCategory = classification.Category.ToString();
                 Data.RiskTier = classification.RiskTier.ToString();
                 Data.ClassificationRationale = classification.Rationale;
-
-                // Persist classification on the Job document so GET /jobs/{id}
-                // returns it and the UI can display it.
-                job.TradeCategory = Data.TradeCategory;
-                job.RiskTier = Data.RiskTier;
-                _session.Store(job);
-                await _session.SaveChangesAsync();
 
                 classifyActivity?.SetTag(SagaTelemetry.TagTradeCategory, Data.TradeCategory);
                 classifyActivity?.SetTag(SagaTelemetry.TagRiskTier, Data.RiskTier);
@@ -106,11 +108,6 @@ public class JobProcessingSaga :
                 Data.RiskTier = "Unknown";
                 Data.ClassificationRationale = "Classifier unavailable";
 
-                job.TradeCategory = Data.TradeCategory;
-                job.RiskTier = Data.RiskTier;
-                _session.Store(job);
-                await _session.SaveChangesAsync();
-
                 classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classifier unavailable");
                 classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "classifier-unavailable");
 
@@ -124,16 +121,31 @@ public class JobProcessingSaga :
                 Data.RiskTier = "Unknown";
                 Data.ClassificationRationale = $"Parse error: {ex.Message}";
 
-                job.TradeCategory = Data.TradeCategory;
-                job.RiskTier = Data.RiskTier;
-                _session.Store(job);
-                await _session.SaveChangesAsync();
-
                 classifyActivity?.SetStatus(ActivityStatusCode.Error, "Classification parse error");
                 classifyActivity?.SetTag(SagaTelemetry.TagOutcome, "parse-error");
 
                 _logger.LogWarning(ex,
                     "Job {JobId} classification failed (parse error). Continuing with Unknown.",
+                    message.JobId);
+            }
+
+            // Persist classification on the Job document so GET /jobs/{id}
+            // returns it and the UI can display it. This is the saga writing
+            // its own results, not reading event-carried state; if the
+            // document has been deleted meanwhile, the saga still proceeds
+            // from the snapshot.
+            var job = await _session.LoadAsync<Job>(message.JobId);
+            if (job is not null)
+            {
+                job.TradeCategory = Data.TradeCategory;
+                job.RiskTier = Data.RiskTier;
+                _session.Store(job);
+                await _session.SaveChangesAsync();
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Job {JobId} document not found while persisting classification; continuing from snapshot",
                     message.JobId);
             }
         }

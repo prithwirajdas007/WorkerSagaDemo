@@ -152,11 +152,26 @@ app.MapPost("/jobs", async (IBus bus, IDocumentStore store) =>
     session.Store(job);
     await session.SaveChangesAsync();
 
+    // Compose the enriched snapshot HERE, inside the same Npgsql transaction
+    // as the document write. The transaction boundary is the correctness
+    // guarantee: the snapshot is built from the exact state being committed,
+    // and both the Job document and the outbox row carrying the snapshot
+    // become visible atomically. Composed outside the transaction, the
+    // payload could capture state that never commits (or misses a concurrent
+    // amendment) and the stale-data bug reappears in a new location.
+    var snapshot = new JobSnapshot
+    {
+        SchemaVersion = JobSnapshot.CurrentSchemaVersion,
+        Description = job.Description,
+        StepNames = job.Steps.Select(s => s.Name).ToList(),
+        CapturedAt = job.CreatedAt,
+    };
+
     // Enlist Rebus in the same Npgsql transaction via the outbox
     using var rebusScope = new RebusTransactionScope();
     rebusScope.UseOutbox(conn, tx);
 
-    await bus.Send(new StartJobCommand(job.Id));
+    await bus.Send(new StartJobCommand(job.Id, snapshot));
 
     await rebusScope.CompleteAsync();
     await tx.CommitAsync();
@@ -171,7 +186,37 @@ app.MapGet("/jobs/{id:guid}", async (Guid id, IQuerySession session) =>
     return job is null ? Results.NotFound() : Results.Ok(job);
 });
 
+// Amend a Job's description after creation. This is the write path that makes
+// the outbox window observable: an amendment landing between the POST /jobs
+// commit and the Worker's handling of StartJobCommand mutates the document
+// the event refers to. Whether the saga sees the original or the amended
+// description depends on what the event carries -- an ID forces a re-read of
+// the (now amended) document; a snapshot preserves what was true at commit.
+app.MapPatch("/jobs/{id:guid}", async (Guid id, AmendJobRequest request, IDocumentStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Description))
+    {
+        return Results.BadRequest(new { error = "Description is required." });
+    }
+
+    await using var session = store.LightweightSession();
+    var job = await session.LoadAsync<Job>(id);
+    if (job is null)
+    {
+        return Results.NotFound();
+    }
+
+    job.Description = request.Description;
+    session.Store(job);
+    await session.SaveChangesAsync();
+
+    return Results.Ok(job);
+});
+
 app.Run();
+
+// Request body for PATCH /jobs/{id}
+public record AmendJobRequest(string? Description);
 
 // Required for Alba integration tests
 public partial class Program { }

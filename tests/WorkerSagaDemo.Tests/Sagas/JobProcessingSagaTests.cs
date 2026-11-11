@@ -77,6 +77,19 @@ public class JobProcessingSagaTests
         };
     }
 
+    private static JobSnapshot CreateSnapshot(
+        string? description = "5Y IRS, USD 50M notional",
+        int schemaVersion = JobSnapshot.CurrentSchemaVersion)
+    {
+        return new JobSnapshot
+        {
+            SchemaVersion = schemaVersion,
+            Description = description,
+            StepNames = new[] { "Validate", "Process", "Finalize" },
+            CapturedAt = DateTimeOffset.UtcNow,
+        };
+    }
+
     // ---------------------------------------------------------------
     // Existing saga tests
     // ---------------------------------------------------------------
@@ -89,7 +102,7 @@ public class JobProcessingSagaTests
         _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
 
         var saga = CreateSaga();
-        await saga.Handle(new StartJobCommand(jobId));
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot()));
 
         var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
         Assert.Equal(jobId, data.JobId);
@@ -103,13 +116,55 @@ public class JobProcessingSagaTests
     }
 
     [Fact]
-    public async Task Handle_StartJobCommand_JobNotFound_MarksComplete()
+    public async Task Handle_StartJobCommand_DocumentMissing_StillSchedulesStepsFromSnapshot()
     {
+        // With the enriched snapshot the saga no longer needs the document to
+        // exist in order to start: everything it consumes is on the message.
+        // The document load only happens when persisting classification
+        // results, and a missing document there is non-fatal.
         var jobId = Guid.NewGuid();
         _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync((Job?)null);
 
         var saga = CreateSaga();
-        await saga.Handle(new StartJobCommand(jobId));
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot()));
+
+        var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
+        Assert.Equal(3, data.TotalSteps);
+        Assert.Equal(2, _deferred.Count);
+    }
+
+    [Fact]
+    public async Task Handle_StartJobCommand_ClassifiesSnapshotDescription_NotDocumentState()
+    {
+        // The regression the enriched snapshot exists to prevent: the
+        // document was amended while StartJobCommand was in flight. The saga
+        // must classify what was committed with the event (the snapshot),
+        // not what the document says at consume time.
+        var jobId = Guid.NewGuid();
+        var amendedJob = CreateTestJob(jobId, "AMENDED WHILE IN FLIGHT: 7Y CDS on Tesla");
+        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(amendedJob);
+
+        var saga = CreateSaga();
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot("5Y IRS, USD 50M notional")));
+
+        _aiServiceMock.Verify(
+            ai => ai.ClassifyTradeAsync("5Y IRS, USD 50M notional", It.IsAny<CancellationToken>()),
+            Times.Once);
+        _aiServiceMock.Verify(
+            ai => ai.ClassifyTradeAsync("AMENDED WHILE IN FLIGHT: 7Y CDS on Tesla", It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_StartJobCommand_NewerSchemaVersion_FailsLoudly()
+    {
+        var jobId = Guid.NewGuid();
+        var saga = CreateSaga();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            saga.Handle(new StartJobCommand(
+                jobId,
+                CreateSnapshot(schemaVersion: JobSnapshot.CurrentSchemaVersion + 1))));
 
         Assert.Empty(_deferred);
     }
@@ -215,7 +270,7 @@ public class JobProcessingSagaTests
                 "CDS on investment-grade corporate"));
 
         var saga = CreateSaga();
-        await saga.Handle(new StartJobCommand(jobId));
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot("5Y CDS on JPMorgan, USD 25M notional")));
 
         var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
         Assert.Equal("CreditDefaultSwap", data.TradeCategory);
@@ -242,7 +297,7 @@ public class JobProcessingSagaTests
                 new System.Net.Http.HttpRequestException()));
 
         var saga = CreateSaga();
-        await saga.Handle(new StartJobCommand(jobId));
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot()));
 
         var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
         Assert.Equal("Unknown", data.TradeCategory);
@@ -259,11 +314,9 @@ public class JobProcessingSagaTests
     public async Task Handle_StartJobCommand_NoDescription_SkipsClassification()
     {
         var jobId = Guid.NewGuid();
-        var job = CreateTestJob(jobId, description: null);
-        _sessionMock.Setup(s => s.LoadAsync<Job>(jobId, It.IsAny<CancellationToken>())).ReturnsAsync(job);
 
         var saga = CreateSaga();
-        await saga.Handle(new StartJobCommand(jobId));
+        await saga.Handle(new StartJobCommand(jobId, CreateSnapshot(description: null)));
 
         var data = (JobProcessingSagaData)typeof(Saga<JobProcessingSagaData>).GetProperty("Data")!.GetValue(saga)!;
         Assert.Null(data.TradeCategory);
@@ -272,6 +325,11 @@ public class JobProcessingSagaTests
         // Classifier was never called
         _aiServiceMock.Verify(
             ai => ai.ClassifyTradeAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        // No classification means no document write either: the handler
+        // performs no document access at all when there is nothing to persist
+        _sessionMock.Verify(
+            s => s.LoadAsync<Job>(It.IsAny<Guid>(), It.IsAny<CancellationToken>()),
             Times.Never);
         // Steps were still scheduled
         Assert.Equal(2, _deferred.Count);
